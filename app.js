@@ -57,13 +57,25 @@ const META = {
   'SINGLE-LEG LEG EXTENSION': ['machine', 'quads'],
   'SINGLE-LEG LYING LEG CURL': ['machine', 'hams'],
   'STANDING CALF RAISE': ['machine', 'calves'],
+  // Cole's gym stand-ins
+  'MACHINE SHOULDER PRESS': ['machine', 'fdelts sdelts triceps'],
+  'LOW ROW': ['machine', 'back biceps rdelts'],
+  'KETTLEBELL DEADLIFT': ['kettlebell', 'hams glutes back'],
+  'SINGLE-LEG ROMANIAN DEADLIFT': ['dumbbell', 'hams glutes'],
+};
+const EXTRA_CUES = {
+  'MACHINE SHOULDER PRESS': 'Set the seat so the handles start at shoulder height. Press up without arching your lower back.',
+  'LOW ROW': 'Chest tall, pull your elbows back past your torso and squeeze your shoulder blades. Avoid shrugging.',
+  'KETTLEBELL DEADLIFT': 'Set your hips back, keep a neutral lower back and the bell close to your legs. Stand tall by squeezing your glutes.',
+  'PEC DECK': 'Nice stretch on the pecs at the bottom and full squeeze at the top. Control!',
+  'REVERSE PEC DECK': 'Sweep the weight out and back. Mind muscle connection with rear delts.',
 };
 const MUSCLE_LABEL = { chest: 'Chest', back: 'Back', fdelts: 'Front delts', sdelts: 'Side delts', rdelts: 'Rear delts', biceps: 'Biceps', triceps: 'Triceps', quads: 'Quads', hams: 'Hamstrings', glutes: 'Glutes', calves: 'Calves', abs: 'Abs' };
 const HEAVY_LOWER = ['BACK SQUAT', 'DEADLIFT', 'ROMANIAN DEADLIFT', 'BARBELL HIP THRUST', 'LEG PRESS'];
 
 // ---------- state ----------
 function defaults() {
-  return { units: 'lb', program: 'ul', week: 0, done: {}, sessions: [], active: null, swaps: {}, supersets: true, theme: 'auto' };
+  return { units: 'lb', program: 'ul', week: 0, done: {}, sessions: [], active: null, swaps: {}, supersets: true, theme: 'auto', duration: 0 };
 }
 let S = load();
 function load() {
@@ -83,12 +95,14 @@ const meta = n => {
   if (META[n]) return { eq: META[n][0], mus: META[n][1].split(' '), primary: META[n][2] === 'primary' };
   const u = n.toUpperCase();
   const eq = /DUMBBELL/.test(u) ? 'dumbbell' : /CABLE|PULLDOWN|ROPE/.test(u) ? 'cable' : /BARBELL|EZ BAR|SMITH|BENCH PRESS|SQUAT|DEADLIFT/.test(u) ? 'barbell' : /MACHINE|PRESS|DECK|CURL|EXTENSION/.test(u) ? 'machine' : 'body';
-  return { eq, mus: [], primary: false };
+  const orig = Object.keys(S.swaps).find(k => S.swaps[k] === n);
+  return { eq, mus: orig && META[orig] ? META[orig][1].split(' ') : [], primary: false };
 };
 const unit = () => S.units;
 function inc(n) {
   const m = meta(n);
   if (m.eq === 'body') return 0;
+  if (m.eq === 'kettlebell') return S.units === 'kg' ? 4 : 10;
   if (S.units === 'kg') return HEAVY_LOWER.includes(n) ? 5 : 2.5;
   return HEAVY_LOWER.includes(n) ? 10 : 5;
 }
@@ -182,10 +196,11 @@ function suggestion(n, target) {
     if (hitAll && last.e.effort !== 'hard') return { w: lastW || '', reps: r, why: `Last time you hit every rep. Aim for ${r} or a couple more.` };
     return { w: lastW || '', reps: r, why: 'Aim to hit every rep this time.' };
   }
-  if (r !== lastR && lastR && r) {
+  if (r !== lastR && lastR && r && lastW > 0) {
     const w = Math.max(step, Math.floor(e1rm(lastW, lastR) / (1 + r / 30) / step) * step);
     return { w, reps: r, why: `Reps changed from ${lastR} to ${r}, so the weight is adjusted to match.` };
   }
+  if (r !== lastR) return { w: lastW, reps: r, why: `Reps changed from ${lastR} to ${r}. Start at your last weight.` };
   if (days > 14) return { w: lastW, reps: r, why: 'It has been a couple of weeks, so start at your last weight.' };
   if (hitAll && last.e.effort === 'easy') return { w: lastW + 2 * step, reps: r, why: `It felt easy last time: +${2 * step} ${unit()}.` };
   if (hitAll && last.e.effort !== 'hard') return { w: lastW + step, reps: r, why: `You hit every rep last time: +${step} ${unit()}.` };
@@ -202,14 +217,40 @@ function warmups(n, w) {
   return steps.length ? 'Warm-up: ' + steps.map(([x, r]) => `${x}×${r}`).join(', ') : '';
 }
 
+// ---------- workout length ----------
+const restSec = e => e.rest[0] * 60 + (e.rest[0] >= 3 ? 0 : 30);
+// Rough minutes: ~45s per set, the rest timer between rounds (supersets share one rest),
+// and ~3 min of warm-up sets for each primary lift.
+function estimateMin(ex) {
+  let t = 0;
+  buildBlocks(ex).forEach(b => {
+    const rounds = Math.max(...b.map(i => ex[i].s));
+    t += rounds * (0.75 * b.length + Math.max(...b.map(i => restSec(ex[i]))) / 60);
+    b.forEach(i => { if (meta(ex[i].n).primary) t += 3; });
+  });
+  return Math.round(t);
+}
+// Fits a workout into the chosen length. The program lists exercises by priority, so it drops
+// accessories from the end first, then trims the remaining accessories to 2 sets.
+function planWorkout(wo) {
+  let ex = wo.ex.map(e => ({ ...e, orig: e.n, n: S.swaps[e.n] || e.n }));
+  const full = estimateMin(ex), budget = S.duration, dropped = [];
+  if (budget) {
+    const lastDroppable = () => { for (let i = ex.length - 1; i > 0; i--) if (!meta(ex[i].n).primary) return i; return -1; };
+    while (estimateMin(ex) > budget * 1.1 && ex.length > 3) { const i = lastDroppable(); if (i < 0) break; dropped.unshift(ex[i]); ex.splice(i, 1); }
+    for (let i = ex.length - 1; i >= 0 && estimateMin(ex) > budget; i--) if (!meta(ex[i].n).primary && ex[i].s > 2) ex[i] = { ...ex[i], s: 2 };
+  }
+  return { ex, dropped, min: estimateMin(ex), full };
+}
+
 // ---------- workout lifecycle ----------
 function startWorkout(wi) {
   const wo = prog().weeks[S.week][wi];
-  const ex = wo.ex.map(e => {
-    const n = S.swaps[e.n] || e.n;
+  const ex = planWorkout(wo).ex.map(e => {
+    const n = e.n;
     const sug = suggestion(n, e);
     return {
-      n, orig: e.n, cue: e.cue, rest: e.rest, why: sug.why,
+      n, orig: e.orig, cue: EXTRA_CUES[n] || e.cue, rest: e.rest, why: sug.why,
       target: { s: e.s, r: e.r, rpe: e.rpe },
       sets: Array.from({ length: e.s }, () => ({ w: sug.w, r: sug.reps, done: false })),
       effort: null,
@@ -300,7 +341,8 @@ function todayView() {
   const total = prog().weeks[S.week].length;
   const last = S.sessions[S.sessions.length - 1];
   const gap = last ? Math.floor((dayKey(Date.now()) - dayKey(last.at)) / 864e5) : null;
-  const ex = wo.ex.map(e => ({ ...e, n: S.swaps[e.n] || e.n }));
+  const plan = planWorkout(wo);
+  const ex = plan.ex;
   const blocks = buildBlocks(ex);
   let letter = 0;
   const list = blocks.map(b => {
@@ -314,9 +356,12 @@ function todayView() {
   <div class="card hero">
     <div class="spread"><span class="muted small">Week ${S.week + 1} of ${prog().weeks.length} · ${done.length}/${total} done this week</span></div>
     <h2>${esc(wo.name)}</h2>
-    <div class="meta">${wo.ex.length} exercises · ${(n => n + (n === 1 ? ' superset' : ' supersets'))(blocks.filter(b => b.length > 1).length)}</div>
+    <div class="meta">About ${plan.min} min · ${ex.length} exercises · ${(n => n + (n === 1 ? ' superset' : ' supersets'))(blocks.filter(b => b.length > 1).length)}</div>
     ${note ? `<div style="margin-top:8px">${note}</div>` : ''}
+    <label class="lbl">How long do you have?</label>
+    <div class="seg" id="durSeg">${[[30, '30 min'], [45, '45 min'], [60, '1 hr'], [0, 'Full']].map(([d, l]) => `<button data-d="${d}" class="${S.duration === d ? 'on' : ''}">${l}</button>`).join('')}</div>
     <ul class="preview">${list}</ul>
+    ${plan.dropped.length ? `<div class="muted small" style="margin-top:6px">Skipped to fit ${S.duration} min: ${plan.dropped.map(e => esc(title(e.n))).join(', ')}</div>` : ''}
   </div>
   <button class="btn" id="startBtn" data-wi="${wi}">Start workout</button>
   <button class="link-btn" id="pickBtn" style="display:block;margin:10px auto 0">Do a different workout</button>`;
@@ -368,6 +413,7 @@ function activeView() {
 }
 
 function bindToday(v) {
+  v.querySelectorAll('[data-d]').forEach(b => b.onclick = () => { S.duration = +b.dataset.d; save(); render(); });
   const start = $('#startBtn', v);
   if (start) start.onclick = () => startWorkout(+start.dataset.wi);
   const pick = $('#pickBtn', v);
@@ -422,18 +468,24 @@ function bindToday(v) {
 function swapSheet(i) {
   const a = S.active, e = a.ex[i];
   const opts = [e.orig, ...(DATA.subs[e.orig] || []).map(x => x.toUpperCase())];
+  if (!opts.includes(e.n)) opts.push(e.n);
   openSheet(`<h3>Swap ${esc(title(e.orig))}</h3><p class="muted small" style="margin-top:0">Alternatives from the program. Your pick is remembered for next time.</p>
     ${opts.map(o => `<button class="choice ${o === e.n ? 'on' : ''}" data-o="${esc(o)}">${esc(title(o))}${o === e.orig ? '<small>As written in the program</small>' : ''}</button>`).join('')}
+    <label class="lbl">Or type what your gym has</label>
+    <div class="row" style="margin-bottom:12px"><input id="customSwap" placeholder="e.g. Low row machine" style="flex:1;height:44px;border-radius:10px;border:1px solid var(--line);background:var(--card-2);color:var(--text);padding:0 10px"><button class="btn slim" id="customGo" style="width:auto;padding:10px 16px">Use</button></div>
     <button class="btn secondary" data-close>Cancel</button>`,
-    c => c.querySelectorAll('[data-o]').forEach(b => b.onclick = () => {
-      const n = b.dataset.o;
+    c => {
+      $('#customGo', c).onclick = () => { const t = $('#customSwap', c).value.trim(); if (t) pick(t.toUpperCase()); };
+      c.querySelectorAll('[data-o]').forEach(b => b.onclick = () => pick(b.dataset.o));
+    });
+  function pick(n) {
       if (n === e.orig) delete S.swaps[e.orig]; else S.swaps[e.orig] = n;
       const sug = suggestion(n, e.target);
-      e.n = n; e.why = sug.why;
+      e.n = n; e.why = sug.why; e.cue = EXTRA_CUES[n] || (DATA.programs[a.program].weeks[a.week][a.wi].ex.find(x => x.n === e.orig) || e).cue;
       e.sets.forEach(s => { if (!s.done) { s.w = sug.w; s.r = sug.reps; } });
       a.blocks = buildBlocks(a.ex);
       save(); closeSheet(); render();
-    }));
+  }
 }
 
 // ---------- stats ----------
@@ -633,8 +685,23 @@ function bindSettings(v) {
       confirmSheet(`Restore ${d.sessions.length} workouts? This replaces what's on this phone.`, 'Restore', () => { S = Object.assign(defaults(), d); save(); render(); toast('Backup restored'); });
     }).catch(() => toast("That file isn't a Lift Log backup."));
   };
-  $('#resetBtn', v).onclick = () => confirmSheet('Erase all workouts and settings? This cannot be undone.', 'Erase everything', () => { S = defaults(); save(); render(); }, true);
+  $('#resetBtn', v).onclick = () => confirmSheet('Erase all workouts and settings? This cannot be undone.', 'Erase everything', () => { S = defaults(); S.seeded = window.SEED_HISTORY && window.SEED_HISTORY.id; save(); render(); }, true);
 }
+
+// One-time import of Cole's workouts logged before the app existed (history.js).
+function importSeed() {
+  const seed = window.SEED_HISTORY;
+  if (!seed || S.seeded === seed.id) return;
+  const fresh = !S.sessions.length;
+  const have = new Set(S.sessions.map(x => x.at));
+  seed.sessions.forEach(x => { if (!have.has(x.at)) S.sessions.push(x); });
+  S.sessions.sort((a, b) => a.at - b.at);
+  Object.entries(seed.swaps).forEach(([k, v]) => { if (!S.swaps[k]) S.swaps[k] = v; });
+  if (fresh) { S.program = seed.program; S.week = seed.week; S.done = {}; }
+  S.seeded = seed.id;
+  save();
+}
+importSeed();
 
 // Ask iOS to keep our storage, and register the offline cache.
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
