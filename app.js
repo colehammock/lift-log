@@ -230,17 +230,33 @@ function estimateMin(ex) {
   });
   return Math.round(t);
 }
-// Fits a workout into the chosen length. The program lists exercises by priority, so it drops
-// accessories from the end first, then trims the remaining accessories to 2 sets.
+// When each exercise was last trained (by program name), so short workouts can rotate.
+function lastDoneMap() {
+  const m = {};
+  S.sessions.forEach(x => x.ex.forEach(e => { m[e.orig || e.n] = Math.max(m[e.orig || e.n] || 0, x.at); }));
+  return m;
+}
+// Fits a workout into the chosen length. Exercises done least recently go in first, so whatever
+// a short session skipped leads off the next one and every muscle gets its turn. Ties keep the
+// program's order, and the kept exercises still run in program order. Then it trims to 2 sets.
 function planWorkout(wo) {
-  let ex = wo.ex.map(e => ({ ...e, orig: e.n, n: S.swaps[e.n] || e.n }));
-  const full = estimateMin(ex), budget = S.duration, dropped = [];
-  if (budget) {
-    const lastDroppable = () => { for (let i = ex.length - 1; i > 0; i--) if (!meta(ex[i].n).primary) return i; return -1; };
-    while (estimateMin(ex) > budget * 1.1 && ex.length > 3) { const i = lastDroppable(); if (i < 0) break; dropped.unshift(ex[i]); ex.splice(i, 1); }
+  const all = wo.ex.map(e => ({ ...e, orig: e.n, n: S.swaps[e.n] || e.n }));
+  const full = estimateMin(all), budget = S.duration;
+  let ex = all, dropped = [], rotated = false;
+  if (budget && full > budget * 1.1) {
+    const last = lastDoneMap();
+    const order = all.map((e, i) => i).sort((a, b) => (last[all[a].orig] || 0) - (last[all[b].orig] || 0) || a - b);
+    const keep = new Set();
+    order.forEach(i => {
+      const trial = all.filter((e, j) => keep.has(j) || j === i);
+      if (!keep.size || estimateMin(trial) <= budget * 1.1) keep.add(i);
+    });
+    ex = all.filter((e, j) => keep.has(j));
+    dropped = all.filter((e, j) => !keep.has(j));
+    rotated = order.slice(0, keep.size).some((i, k) => i !== k);
     for (let i = ex.length - 1; i >= 0 && estimateMin(ex) > budget; i--) if (!meta(ex[i].n).primary && ex[i].s > 2) ex[i] = { ...ex[i], s: 2 };
   }
-  return { ex, dropped, min: estimateMin(ex), full };
+  return { ex, dropped, rotated, min: estimateMin(ex), full };
 }
 
 // ---------- workout lifecycle ----------
@@ -409,7 +425,8 @@ function todayView() {
     <label class="lbl">How long do you have?</label>
     <div class="seg" id="durSeg">${[[30, '30 min'], [45, '45 min'], [60, '1 hr'], [0, 'Full']].map(([d, l]) => `<button data-d="${d}" class="${S.duration === d ? 'on' : ''}">${l}</button>`).join('')}</div>
     <ul class="preview">${list}</ul>
-    ${plan.dropped.length ? `<div class="muted small" style="margin-top:6px">Skipped to fit ${S.duration} min: ${plan.dropped.map(e => esc(title(e.n))).join(', ')}</div>` : ''}
+    ${plan.rotated ? `<div class="muted small" style="margin-top:6px">Picks up exercises you skipped last time, so every muscle gets its turn.</div>` : ''}
+    ${plan.dropped.length ? `<div class="muted small" style="margin-top:6px">Saved for next time: ${plan.dropped.map(e => esc(title(e.n))).join(', ')}</div>` : ''}
   </div>
   <button class="btn" id="startBtn" data-wi="${wi}">Start workout</button>
   <button class="link-btn" id="pickBtn" style="display:block;margin:10px auto 0">Do a different workout</button>`;
