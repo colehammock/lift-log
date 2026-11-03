@@ -244,32 +244,80 @@ function planWorkout(wo) {
 }
 
 // ---------- workout lifecycle ----------
+function activeEx(e) {
+  const n = e.n;
+  const sug = suggestion(n, e);
+  return {
+    n, orig: e.orig, cue: EXTRA_CUES[n] || e.cue, rest: e.rest, why: sug.why,
+    target: { s: e.s, r: e.r, rpe: e.rpe },
+    sets: Array.from({ length: e.s }, () => ({ w: sug.w, r: sug.reps, done: false })),
+    effort: null,
+  };
+}
+// The program's prescription for an exercise: this week's workout first, then any other week.
+function programSpec(orig) {
+  const weeks = prog().weeks;
+  const order = [S.week, ...weeks.map((_, i) => i).filter(i => i !== S.week)];
+  for (const w of order) for (const wo of weeks[w]) { const e = wo.ex.find(x => x.n === orig); if (e) return e; }
+  return null;
+}
+function addExercise(orig) {
+  const a = S.active;
+  const spec = programSpec(orig) || { n: orig, s: 3, r: '10', rpe: 8, rest: [1, 2], cue: '' };
+  const n = S.swaps[orig] || orig;
+  a.ex.push(activeEx({ ...spec, n, orig }));
+  a.blocks.push([a.ex.length - 1]);
+  a.skipped = (a.skipped || []).filter(x => x !== orig);
+  save(); render();
+  setTimeout(() => { const els = document.querySelectorAll('.block'); if (els.length) els[els.length - 1].scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 50);
+}
+function addSheet() {
+  const a = S.active;
+  const inWorkout = new Set(a.ex.map(e => e.orig));
+  const skipped = (a.skipped || []).filter(x => !inWorkout.has(x));
+  const all = Array.from(new Set(prog().weeks.flat().flatMap(wo => wo.ex.map(e => e.n)))).filter(x => !inWorkout.has(x) && !skipped.includes(x)).sort();
+  const row = o => `<button class="choice" data-add="${esc(o)}">${esc(title(S.swaps[o] || o))}${(p => p ? `<small>${p.s}×${esc(p.r)}</small>` : '')(programSpec(o))}</button>`;
+  openSheet(`<h3>Add an exercise</h3>
+    ${skipped.length ? `<label class="lbl" style="margin-top:0">Skipped today to save time</label>${skipped.map(row).join('')}` : ''}
+    <label class="lbl">Or type your own</label>
+    <div class="row" style="margin-bottom:4px"><input id="customAdd" placeholder="e.g. Cable crunch" style="flex:1;height:44px;border-radius:10px;border:1px solid var(--line);background:var(--card-2);color:var(--text);padding:0 10px"><button class="btn slim" id="customAddGo" style="width:auto;padding:10px 16px">Add</button></div>
+    <label class="lbl">Everything in the program</label>${all.map(row).join('')}
+    <button class="btn secondary" data-close>Cancel</button>`,
+    c => {
+      c.querySelectorAll('[data-add]').forEach(b => b.onclick = () => { closeSheet(); addExercise(b.dataset.add); });
+      $('#customAddGo', c).onclick = () => { const t = $('#customAdd', c).value.trim(); if (t) { closeSheet(); addExercise(t.toUpperCase()); } };
+    });
+}
+function cardioHtml(c) {
+  const f = (k, label, mode) => `<div class="field"><input inputmode="${mode}" data-c="${k}" value="${esc(c[k])}" aria-label="${label}"><span>${label}</span></div>`;
+  return `<div class="block"><div class="ex">
+    <div class="ex-name"><span>Treadmill finisher</span><button class="link-btn small" data-act="cardio-remove">Remove</button></div>
+    <div class="ex-target">Incline walk to finish. Change any number to match today.</div>
+    <div class="set ${c.done ? 'done' : ''}" style="grid-template-columns:1fr 1fr 1fr 52px;margin-top:10px">
+      ${f('incline', 'incl', 'decimal')}${f('speed', 'mph', 'decimal')}${f('min', 'min', 'numeric')}
+      <button class="check" data-act="cardio-check" aria-label="Mark treadmill done"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg></button>
+    </div></div></div>`;
+}
 function startWorkout(wi) {
   const wo = prog().weeks[S.week][wi];
-  const ex = planWorkout(wo).ex.map(e => {
-    const n = e.n;
-    const sug = suggestion(n, e);
-    return {
-      n, orig: e.orig, cue: EXTRA_CUES[n] || e.cue, rest: e.rest, why: sug.why,
-      target: { s: e.s, r: e.r, rpe: e.rpe },
-      sets: Array.from({ length: e.s }, () => ({ w: sug.w, r: sug.reps, done: false })),
-      effort: null,
-    };
-  });
-  S.active = { program: S.program, week: S.week, wi, name: wo.name, startedAt: Date.now(), ex, blocks: buildBlocks(ex), open: {} };
+  const plan = planWorkout(wo);
+  const ex = plan.ex.map(activeEx);
+  S.active = { program: S.program, week: S.week, wi, name: wo.name, startedAt: Date.now(), ex, blocks: buildBlocks(ex), open: {}, skipped: plan.dropped.map(e => e.orig) };
   save(); render();
   window.scrollTo(0, 0);
 }
 function finishWorkout() {
   const a = S.active;
   const ex = a.ex.filter(e => e.sets.some(s => s.done)).map(e => ({ n: e.n, orig: e.orig, target: e.target, effort: e.effort, sets: e.sets.filter(s => s.done).map(s => ({ w: +s.w || 0, r: +s.r || 0, done: true })) }));
-  if (!ex.length) { S.active = null; save(); render(); return; }
+  const cardio = a.cardio && a.cardio.done ? { incline: +a.cardio.incline || 0, speed: +a.cardio.speed || 0, min: +a.cardio.min || 0 } : null;
+  if (cardio) S.cardioLast = cardio;
+  if (!ex.length && !cardio) { S.active = null; save(); render(); return; }
   const prs = ex.filter(e => {
     const best = Math.max(...e.sets.map(s => e1rm(s.w, s.r)));
     const prev = S.sessions.flatMap(s => s.ex.filter(x => x.n === e.n)).flatMap(x => x.sets).map(s => e1rm(s.w, s.r));
     return prev.length && best > Math.max(...prev) && best > 0;
   }).map(e => title(e.n));
-  S.sessions.push({ at: Date.now(), program: a.program, week: a.week, wi: a.wi, name: a.name, min: Math.round((Date.now() - a.startedAt) / 6e4), ex });
+  S.sessions.push({ at: Date.now(), program: a.program, week: a.week, wi: a.wi, name: a.name, min: Math.round((Date.now() - a.startedAt) / 6e4), ex, ...(cardio ? { cardio } : {}) });
   const k = a.program + ':' + a.week;
   S.done[k] = Array.from(new Set([...(S.done[k] || []), a.wi]));
   S.active = null;
@@ -408,6 +456,11 @@ function activeView() {
   const totalSets = a.ex.reduce((t, e) => t + e.sets.length, 0);
   return `<div class="muted small" style="margin:-4px 0 10px">Week ${a.week + 1} · ${doneSets}/${totalSets} sets done · tap ✓ after each set</div>
     ${blocks}
+    ${a.cardio ? cardioHtml(a.cardio) : ''}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+      <button class="btn secondary slim" data-act="add">+ Add exercise</button>
+      ${a.cardio ? '<span></span>' : '<button class="btn secondary slim" data-act="cardio-add">+ Treadmill finisher</button>'}
+    </div>
     <button class="btn" id="finishBtn">Finish workout</button>
     <button class="link-btn" id="cancelBtn" style="display:block;margin:10px auto 0;color:var(--danger)">Discard workout</button>`;
 }
@@ -428,6 +481,7 @@ function bindToday(v) {
   if (!S.active) return;
   const a = S.active;
   v.oninput = e => {
+    if (e.target.dataset.c) { a.cardio[e.target.dataset.c] = e.target.value.replace(',', '.'); save(); return; }
     const row = e.target.closest('.set'); if (!row) return;
     const i = +row.dataset.ex, k = +row.dataset.set, f = e.target.dataset.f;
     const val = e.target.value.replace(',', '.');
@@ -440,6 +494,11 @@ function bindToday(v) {
     const btn = e.target.closest('[data-act],[data-eff]'); if (!btn) return;
     if (btn.dataset.eff) { const i = +btn.closest('.effort').dataset.ex; a.ex[i].effort = btn.dataset.eff; save(); render(); return; }
     const act = btn.dataset.act;
+    const keepY = () => { const y = window.scrollY; render(); window.scrollTo(0, y); };
+    if (act === 'add') { addSheet(); return; }
+    if (act === 'cardio-add') { a.cardio = { ...(S.cardioLast || { incline: 12, speed: 3, min: 10 }), done: false }; save(); keepY(); return; }
+    if (act === 'cardio-remove') { delete a.cardio; save(); keepY(); return; }
+    if (act === 'cardio-check') { a.cardio.done = !a.cardio.done; save(); keepY(); return; }
     if (act === 'info') { const i = +btn.dataset.ex; a.open[i] = !a.open[i]; save(); render(); return; }
     if (act === 'swap') { swapSheet(+btn.dataset.ex); return; }
     if (act === 'check') {
@@ -619,7 +678,7 @@ function historyView() {
     const vol = s.ex.reduce((t, e) => t + e.sets.reduce((u, x) => u + x.w * x.r, 0), 0);
     return `<details class="card hist"><summary><div class="spread"><b>${esc(s.name)}</b><span class="muted small">${fmtDate(s.at)}</span></div>
       <div class="muted small">${sets} sets · ${Math.round(vol).toLocaleString()} ${unit()} lifted${s.min ? ` · ${s.min} min` : ''}</div></summary>
-      <table>${s.ex.map(e => `<tr><td>${esc(title(e.n))}</td><td>${e.sets.map(x => (x.w ? x.w + '×' : '') + x.r).join(', ')}</td></tr>`).join('')}</table>
+      <table>${s.ex.map(e => `<tr><td>${esc(title(e.n))}</td><td>${e.sets.map(x => (x.w ? x.w + '×' : '') + x.r).join(', ')}</td></tr>`).join('')}${s.cardio ? `<tr><td>Treadmill</td><td>${s.cardio.min} min · incline ${s.cardio.incline} · ${s.cardio.speed} mph</td></tr>` : ''}</table>
       <button class="link-btn small" data-del="${idx}" style="color:var(--danger);margin-top:6px">Delete this workout</button></details>`;
   }).join('');
 }
